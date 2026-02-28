@@ -1,7 +1,8 @@
 """
 Configuration Settings for Virtual Pet Game
-===========================================
+==========================================
 All game constants, colors, and settings in one place.
+Includes mobile-responsive settings for Android.
 """
 
 import os
@@ -11,10 +12,34 @@ import os
 # ============================================
 SCREEN_WIDTH = 800
 SCREEN_HEIGHT = 600
+
+# Mobile-responsive screen settings (used on Android)
+MOBILE_SCREEN_WIDTH = 480
+MOBILE_SCREEN_HEIGHT = 800
+MOBILE_LANDSCAPE_WIDTH = 800
+MOBILE_LANDSCAPE_HEIGHT = 480
+
+# World settings (larger than screen for exploration)
 WORLD_WIDTH = 1600
 WORLD_HEIGHT = 1200
 FPS = 60
 GAME_CAPTION = "Virtual Pet Game - Explore the World!"
+
+# ============================================
+# Responsive UI Settings
+# ============================================
+# Scale factors for different screen densities
+UI_SCALE_SMALL = 0.75    # Small phones
+UI_SCALE_MEDIUM = 1.0    # Standard phones
+UI_SCALE_LARGE = 1.25    # Large phones/tablets
+UI_SCALE_TABLET = 1.5   # Tablets
+
+# Dynamic scaling - automatically calculated based on screen size
+AUTO_SCALE = True
+
+# Touch-friendly sizing
+TOUCH_TARGET_MIN_SIZE = 48  # Minimum touch target size in pixels
+TOUCH_SLOP = 10  # Extra tolerance for touch detection
 
 # ============================================
 # Colors
@@ -49,15 +74,25 @@ INPUT_BOX_MARGIN = 20
 SPEECH_BUBBLE_LIFETIME = 4000  # ms
 SPEECH_BUBBLE_FADE_TIME = 2000  # ms
 
+# Mobile-specific UI settings
+MOBILE_INPUT_BOX_HEIGHT = 50  # Larger for touch
+MOBILE_UI_PADDING = 16
+
 # HUD Settings
 HUD_ENABLED = True
 MINIMAP_ENABLED = True
 MINIMAP_WIDTH = 160
 MINIMAP_HEIGHT = 120
 
+# Mobile HUD settings
+MOBILE_MINIMAP_WIDTH = 100
+MOBILE_MINIMAP_HEIGHT = 75
+
 # Character stats panel
 STATS_PANEL_WIDTH = 200
 STATS_PANEL_HEIGHT = 150
+MOBILE_STATS_PANEL_WIDTH = 150
+MOBILE_STATS_PANEL_HEIGHT = 120
 
 # ============================================
 # Character Settings
@@ -148,7 +183,6 @@ FIREWORKS_MODEL = "accounts/fireworks/models/minimax-m2p5"
 
 # ============================================
 # Character System Prompts
-# ============================================
 CHARACTER_PROMPTS = {
     "Fifi": "You are Fifi, a friendly virtual pet. Give brief, direct answers (1-2 sentences max). Be sweet and caring.",
     "Shyel": "You are Shyel, a shy virtual pet. Give brief answers (1-2 sentences max). Speak softly and use '...' for pauses.",
@@ -205,3 +239,67 @@ OBJECT_ROCK = "rock"
 WINDOW_RECT = (50, 50, 120, 100)
 PICTURE_FRAME_RECT = (350, 60, 80, 60)
 PLANT_POSITION = (720, 180)
+
+
+# ============================================
+# Android/PGS4A Specific Settings
+# ============================================
+ANDROID_PACKAGE_NAME = "com.virtualpet.game"
+ANDROID_VERSION_CODE = "1"
+ANDROID_VERSION_NAME = "1.0.0"
+
+# Touch gesture settings
+TOUCH_TAP_THRESHOLD = 20  # pixels
+TOUCH_TAP_TIME = 300  # ms
+TOUCH_LONG_PRESS_TIME = 500  # ms
+
+# Pinch zoom settings
+PINCH_ZOOM_ENABLED = True
+PINCH_MIN_SCALE = 0.5
+PINCH_MAX_SCALE = 2.0
+
+# Virtual keyboard settings
+VIRTUAL_KEYBOARD_ENABLED = True
+VIRTUAL_KEYBOARD_HEIGHT = 200  # approximate
+
+
+def get_screen_config(is_android=False, screen_width=None, screen_height=None):
+    """Get appropriate screen configuration based on device.
+    
+    Args:
+        is_android: Whether running on Android
+        screen_width: Actual screen width (for Android)
+        screen_height: Actual screen height (for Android)
+    
+    Returns:
+        tuple: (width, height, scale_factor)
+    """
+    if is_android and screen_width and screen_height:
+        # Determine if portrait or landscape
+        is_portrait = screen_height > screen_width
+        
+        if is_portrait:
+            width = min(screen_width, MOBILE_SCREEN_WIDTH)
+            height = min(screen_height, MOBILE_SCREEN_HEIGHT)
+        else:
+            width = min(screen_width, MOBILE_LANDSCAPE_WIDTH)
+            height = min(screen_height, MOBILE_LANDSCAPE_HEIGHT)
+        
+        # Calculate scale based on screen size
+        scale = min(screen_width / SCREEN_WIDTH, screen_height / SCREEN_HEIGHT)
+        
+        return width, height, scale
+    
+    return SCREEN_WIDTH, SCREEN_HEIGHT, 1.0
+
+
+def get_touch_settings():
+    """Get touch-friendly UI settings based on screen size."""
+    return {
+        'input_box_height': MOBILE_INPUT_BOX_HEIGHT,
+        'ui_padding': MOBILE_UI_PADDING,
+        'minimap_width': MOBILE_MINIMAP_WIDTH,
+        'minimap_height': MOBILE_MINIMAP_HEIGHT,
+        'stats_panel_width': MOBILE_STATS_PANEL_WIDTH,
+        'stats_panel_height': MOBILE_STATS_PANEL_HEIGHT,
+    }

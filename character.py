@@ -40,6 +40,7 @@ class Character(Sprite):
         
         # States
         self.state = 'idle'
+        self.following = False  # Track if character is following player
         self.happiness = 50  # 0-100
         self.hunger = 0  # 0-100 (increases over time)
         self.energy = 100  # 0-100 (decreases over time)
@@ -76,6 +77,16 @@ class Character(Sprite):
         self.last_met_character = None
         self.shared_info = []
         
+        # === PLAYER RELATIONSHIP SYSTEM ===
+        self.player_relationship = 50  # 0-100 scale, starts at neutral
+        self.player_memory = []  # Stores recent player interactions with sentiment
+        self.max_memory_entries = 10  # Keep last 10 interactions
+        self.last_sentiment = None  # Track last sentiment for memory
+        
+        # Visual effects for relationship changes
+        self.heart_particles = []  # Floating hearts when relationship increases
+        self.storm_particles = []  # Storm clouds when relationship decreases
+        
         # === LEARNING SYSTEM ===
         self.action_outcomes = {}
         self.curiosity = 50
@@ -111,6 +122,19 @@ class Character(Sprite):
             if abs(self.bounce_offset) > 15:
                 self.dance_direction *= -1
         
+        # Update following state
+        if self.state == 'following':
+            # Continue following - target is already set
+            # Update target to track mouse
+            if world:
+                mouse_x, mouse_y = world.camera.screen_to_world(mouse_pos[0], mouse_pos[1])
+                self.target_x = mouse_x
+                self.target_y = mouse_y
+                self.speed = 3
+        
+        # Update particle effects
+        self.update_particles()
+        
         # Time-based state changes (needs)
         time_since_interaction = current_time - self.last_interaction_time
         
@@ -131,7 +155,7 @@ class Character(Sprite):
             self.update_playful_ai(mouse_pos, time_since_interaction, world)
         
         # Check needs-based states
-        if self.state not in ['happy', 'angry', 'scared', 'hiding', 'tantrum', 'playing', 'dancing', 'lined', 'seeking']:
+        if self.state not in ['happy', 'angry', 'scared', 'hiding', 'tantrum', 'playing', 'dancing', 'lined', 'seeking', 'following', 'sleeping', 'eating']:
             if self.hunger > 70:
                 self.state = 'hungry'
                 self.color = [min(255, c + 30) for c in self.base_color]
@@ -145,7 +169,7 @@ class Character(Sprite):
                 self.color = list(self.base_color)
         
         # Check for nearby objects to interact with
-        if world and self.state not in ['dancing', 'tantrum', 'hiding']:
+        if world and self.state not in ['dancing', 'tantrum', 'hiding', 'following', 'sleeping', 'eating']:
             self.check_nearby_objects(world, current_time)
         
         # Check for nearby characters (communication)
@@ -528,6 +552,301 @@ class Character(Sprite):
         if obj_type in self.known_locations and self.known_locations[obj_type] is None:
             self.known_locations[obj_type] = location
     
+    # =============================
+    # PLAYER SENTIMENT & RELATIONSHIP SYSTEM
+    # =============================
+    
+    # Positive keywords (increase relationship)
+    POSITIVE_KEYWORDS = [
+        'love', 'like', 'nice', 'good', 'great', 'amazing', 'wonderful', 'happy', 
+        'beautiful', 'cute', 'adorable', 'sweet', 'kind', 'friendly', 'best', 'awesome',
+        'fun', 'play', 'hug', 'miss', 'care', 'thanks', 'thank', 'please', 'sorry',
+        'good job', 'well done', 'i love you', 'you are the best', 'good girl', 'good boy',
+        'happy to see you', 'glad', 'cheerful', 'joy', 'excited', 'yay', 'hooray'
+    ]
+    
+    # Negative keywords (decrease relationship)
+    NEGATIVE_KEYWORDS = [
+        'bad', 'hate', 'stupid', 'dumb', 'ugly', 'annoying', 'go away', 'leave',
+        'shut up', 'no', 'not', 'never', 'wrong', 'worst', 'terrible', 'awful',
+        'boring', 'annoyed', 'mad', 'angry', 'upset', 'sad', 'cry', 'mean',
+        'behave', 'stop', 'quit', 'shoo', 'get lost', 'disappointed', 'fail'
+    ]
+    
+    def analyze_sentiment(self, message):
+        """Analyze the sentiment of a player's message.
+        
+        Returns:
+            'positive' - message is positive, increases relationship
+            'negative' - message is negative, decreases relationship
+            'neutral' - no significant sentiment detected
+        """
+        msg_lower = message.lower()
+        
+        # Check for positive sentiment
+        positive_count = 0
+        for keyword in self.POSITIVE_KEYWORDS:
+            if keyword in msg_lower:
+                positive_count += 1
+        
+        # Check for negative sentiment
+        negative_count = 0
+        for keyword in self.NEGATIVE_KEYWORDS:
+            if keyword in msg_lower:
+                negative_count += 1
+        
+        # Determine sentiment
+        if positive_count > negative_count:
+            return 'positive'
+        elif negative_count > positive_count:
+            return 'negative'
+        else:
+            # Check for explicit love/hate words
+            if any(word in msg_lower for word in ['love', 'like', 'happy', 'great', 'good']):
+                return 'positive'
+            elif any(word in msg_lower for word in ['hate', 'bad', 'stupid', 'dumb', 'go away', 'leave']):
+                return 'negative'
+            return 'neutral'
+    
+    def process_player_message(self, message):
+        """Process a player's message and update relationship based on sentiment.
+        
+        Returns:
+            tuple: (sentiment, relationship_change, response_text)
+        """
+        sentiment = self.analyze_sentiment(message)
+        self.last_sentiment = sentiment
+        
+        # Calculate relationship change
+        if sentiment == 'positive':
+            relationship_change = random.randint(3, 8)
+            self.player_relationship = min(100, self.player_relationship + relationship_change)
+            # Add heart particles
+            self._spawn_heart_particles()
+        elif sentiment == 'negative':
+            relationship_change = random.randint(-8, -3)
+            self.player_relationship = max(0, self.player_relationship + relationship_change)
+            # Add storm particles
+            self._spawn_storm_particles()
+        else:
+            relationship_change = 0
+        
+        # Store in memory
+        self._add_to_memory(message, sentiment)
+        
+        # Generate response based on relationship and sentiment
+        response = self._generate_sentiment_response(sentiment)
+        
+        # Update character color based on relationship
+        self._update_color_for_relationship()
+        
+        return sentiment, relationship_change, response
+    
+    def _add_to_memory(self, message, sentiment):
+        """Add a player interaction to memory."""
+        entry = {
+            'message': message[:50],  # Store truncated message
+            'sentiment': sentiment,
+            'timestamp': pygame.time.get_ticks()
+        }
+        self.player_memory.append(entry)
+        
+        # Keep memory limited
+        if len(self.player_memory) > self.max_memory_entries:
+            self.player_memory.pop(0)
+    
+    def _spawn_heart_particles(self):
+        """Spawn floating heart particles for positive sentiment."""
+        for _ in range(5):
+            self.heart_particles.append({
+                'x': self.x + random.randint(-30, 30),
+                'y': self.y - self.radius,
+                'vy': -2 - random.random(),  # Float upward
+                'life': 60  # frames
+            })
+    
+    def _spawn_storm_particles(self):
+        """Spawn storm cloud particles for negative sentiment."""
+        for _ in range(3):
+            self.storm_particles.append({
+                'x': self.x + random.randint(-40, 40),
+                'y': self.y - self.radius - random.randint(0, 20),
+                'life': 45
+            })
+    
+    def update_particles(self):
+        """Update and clean up particle effects."""
+        # Update hearts
+        for heart in self.heart_particles[:]:
+            heart['y'] += heart['vy']
+            heart['life'] -= 1
+            if heart['life'] <= 0:
+                self.heart_particles.remove(heart)
+        
+        # Update storm clouds
+        for cloud in self.storm_particles[:]:
+            cloud['life'] -= 1
+            if cloud['life'] <= 0:
+                self.storm_particles.remove(cloud)
+    
+    def _update_color_for_relationship(self):
+        """Update character color based on relationship level."""
+        rel = self.player_relationship
+        
+        if rel >= 70:
+            # High relationship - pinker/happier tint
+            tint = 20
+            self.color = [
+                min(255, self.base_color[0] + tint),
+                min(255, self.base_color[1] + tint),
+                min(255, self.base_color[2] + tint)
+            ]
+        elif rel < 20:
+            # Very low relationship - red/angry tint
+            tint = 40
+            self.color = [
+                min(255, self.base_color[0] + tint),
+                max(0, self.base_color[1] - tint // 2),
+                max(0, self.base_color[2] - tint)
+            ]
+        elif rel < 40:
+            # Low relationship - slightly red tint
+            tint = 20
+            self.color = [
+                min(255, self.base_color[0] + tint // 2),
+                max(0, self.base_color[1] - tint // 2),
+                max(0, self.base_color[2] - tint // 2)
+            ]
+        else:
+            # Normal - use base color
+            self.color = list(self.base_color)
+    
+    def _generate_sentiment_response(self, sentiment):
+        """Generate a response based on current sentiment and relationship."""
+        rel = self.player_relationship
+        
+        if sentiment == 'positive':
+            if rel >= 70:
+                responses = [
+                    "You're being so nice today! I love it!",
+                    "*beams* That's so sweet of you!",
+                    "I love spending time with you! You're the best!",
+                    "*hugs* You're my favorite person!"
+                ]
+            elif rel >= 40:
+                responses = [
+                    "That's nice of you to say!",
+                    "*smiles* Thanks! That makes me happy!",
+                    "You're being nice today! I appreciate it!",
+                    "*giggles* That's wonderful!"
+                ]
+            else:
+                responses = [
+                    "...You're being nice?",
+                    "*suspicious* What do you want?",
+                    "*eyes you warily* Thanks, I guess...",
+                    "I... appreciate that. Are you feeling okay?"
+                ]
+            return random.choice(responses)
+        
+        elif sentiment == 'negative':
+            if rel >= 70:
+                responses = [
+                    "*looks sad* Why are you being mean?",
+                    "*frowns* I thought we were friends...",
+                    "*confused* That hurt my feelings...",
+                    "*pouts* Don't be mean to me!"
+                ]
+            elif rel >= 40:
+                responses = [
+                    "*sighs* You're being mean again...",
+                    "That wasn't very nice...",
+                    "*looks hurt* Why would you say that?",
+                    "*turns away* I don't like that..."
+                ]
+            else:
+                responses = [
+                    "*glares* I knew you were like this!",
+                    "*crosses arms* Leave me alone!",
+                    "*angry* That's it, I'm done talking!",
+                    "*huffs* You can't talk to me like that!"
+                ]
+            return random.choice(responses)
+        
+        else:  # neutral
+            if rel >= 70:
+                responses = [
+                    "*nods* Is there anything fun we can do?",
+                    "*tilts head* Tell me more!",
+                    "That's interesting! What else?",
+                    "*listens carefully* Go on..."
+                ]
+            elif rel >= 40:
+                responses = [
+                    "I see...",
+                    "*nods* That's nice.",
+                    "Hmm, okay!",
+                    "Interesting!"
+                ]
+            else:
+                responses = [
+                    "*shrugs* Sure, whatever.",
+                    "*looks away* Not interested.",
+                    "*mumbles* Fine...",
+                    "*indifferent* Uh-huh."
+                ]
+            return random.choice(responses)
+    
+    def get_relationship_level(self):
+        """Get the relationship level description."""
+        rel = self.player_relationship
+        if rel >= 70:
+            return "very_high"
+        elif rel >= 40:
+            return "medium"
+        elif rel >= 20:
+            return "low"
+        else:
+            return "very_low"
+    
+    def get_memory_reference(self):
+        """Get a reference to past interactions for AI context."""
+        if not self.player_memory:
+            return None
+        
+        recent = self.player_memory[-3:]  # Last 3 interactions
+        has_positive = any(m['sentiment'] == 'positive' for m in recent)
+        has_negative = any(m['sentiment'] == 'negative' for m in recent)
+        
+        if has_positive and not has_negative:
+            return "recently_positive"
+        elif has_negative and not has_positive:
+            return "recently_negative"
+        elif has_positive and has_negative:
+            return "mixed"
+        return None
+    
+    def get_relationship_prompt_info(self):
+        """Get relationship info to include in AI prompts."""
+        level = self.get_relationship_level()
+        memory_ref = self.get_memory_reference()
+        
+        info = f"Relationship with player: {level} ({self.player_relationship}/100)."
+        
+        if memory_ref == "recently_positive":
+            info += " The player has been nice recently."
+        elif memory_ref == "recently_negative":
+            info += " The player has been mean recently."
+        elif memory_ref == "mixed":
+            info += " The player's attitude has been inconsistent."
+        
+        # Add specific references
+        for mem in self.player_memory[-2:]:
+            if mem['sentiment'] == 'negative' and self.player_relationship < 30:
+                info += f" The player said: '{mem['message']}' before."
+        
+        return info
+    
     def invite_to_play(self, other):
         """Invite another character to play."""
         if not other:
@@ -629,6 +948,212 @@ class Character(Sprite):
         self.bounce_offset = 0
         self.color = list(self.base_color)
     
+    # =============================
+    # ACTION COMMAND METHODS
+    # =============================
+    
+    def do_action(self, action, world, mouse_pos=None):
+        """Execute an action command.
+        
+        Args:
+            action: The action name ('sleep', 'eat', 'play', 'dance', 'follow', 'come', 'stay')
+            world: The game world object
+            mouse_pos: Optional mouse position in world coordinates
+        
+        Returns:
+            A message confirming the action
+        """
+        if action == 'sleep':
+            return self.do_sleep(world)
+        elif action == 'eat':
+            return self.do_eat(world)
+        elif action == 'play':
+            return self.do_play(world)
+        elif action == 'dance':
+            return self.do_dance()
+        elif action == 'follow':
+            return self.do_follow(mouse_pos)
+        elif action == 'come':
+            return self.do_come_here(mouse_pos)
+        elif action == 'stay':
+            return self.do_stay()
+        
+        return "I don't understand that command."
+    
+    def do_sleep(self, world):
+        """Make character go to sleep (find bed and rest)."""
+        if not world:
+            self.state = 'sleeping'
+            self.state_timer = 300  # 5 seconds
+            return "*yawns* I'm so tired... *lies down*"
+        
+        # Find nearest bed
+        nearest_bed = world.get_nearest_object('bed', self.x, self.y, 800)
+        if nearest_bed:
+            # Use pathfinding if available
+            if world.pathfinding:
+                path = world.find_path(self.x, self.y, nearest_bed.x, nearest_bed.y)
+                if path:
+                    self.set_path(path)
+                else:
+                    self.target_x = nearest_bed.x
+                    self.target_y = nearest_bed.y
+            else:
+                self.target_x = nearest_bed.x
+                self.target_y = nearest_bed.y
+            
+            self.state = 'seeking'
+            self.state_timer = 180  # 3 seconds to get there
+            return "*yawns* I think I see a bed... I'm so sleepy..."
+        else:
+            # No bed found, just sleep here
+            self.state = 'sleeping'
+            self.state_timer = 300
+            return "*yawns* No bed nearby... I'll just sleep here... *curls up*"
+    
+    def do_eat(self, world):
+        """Make character go to food bowl."""
+        if not world:
+            self.state = 'eating'
+            self.state_timer = 180
+            return "*munches* Yummy food!"
+        
+        # Find nearest food bowl
+        nearest_food = world.get_nearest_object('food_bowl', self.x, self.y, 800)
+        if nearest_food:
+            # Use pathfinding if available
+            if world.pathfinding:
+                path = world.find_path(self.x, self.y, nearest_food.x, nearest_food.y)
+                if path:
+                    self.set_path(path)
+                else:
+                    self.target_x = nearest_food.x
+                    self.target_y = nearest_food.y
+            else:
+                self.target_x = nearest_food.x
+                self.target_y = nearest_food.y
+            
+            self.state = 'seeking'
+            self.state_timer = 180
+            self.hunger = max(0, self.hunger - 30)  # Reduce hunger
+            return "Food! I'm coming! *runs to food bowl*"
+        else:
+            self.state = 'eating'
+            self.state_timer = 180
+            return "*looks around* I don't see any food... *pouts*"
+    
+    def do_play(self, world):
+        """Make character go to toy and play."""
+        if not world:
+            self.state = 'playing'
+            self.bounce_timer = 180
+            return "*bounces around* This is fun!"
+        
+        # Find nearest toy
+        nearest_toy = world.get_nearest_object('toy', self.x, self.y, 800)
+        if nearest_toy:
+            # Use pathfinding if available
+            if world.pathfinding:
+                path = world.find_path(self.x, self.y, nearest_toy.x, nearest_toy.y)
+                if path:
+                    self.set_path(path)
+                else:
+                    self.target_x = nearest_toy.x
+                    self.target_y = nearest_toy.y
+            else:
+                self.target_x = nearest_toy.x
+                self.target_y = nearest_toy.y
+            
+            self.state = 'seeking'
+            self.state_timer = 180
+            self.happiness = min(100, self.happiness + 15)
+            return "A toy! Let me get it! *bounces excitedly*"
+        else:
+            self.state = 'playing'
+            self.bounce_timer = 180
+            self.happiness = min(100, self.happiness + 10)
+            return "*looks around* I don't see any toys... Let's play anyway! *bounces*"
+    
+    def do_dance(self):
+        """Make character start dancing."""
+        self.state = 'dancing'
+        self.state_timer = 180  # 3 seconds
+        self.bounce_offset = 0
+        self.dance_direction = 1
+        self.happiness = min(100, self.happiness + 10)
+        
+        if self.personality == config.PERSONALITY_PLAYFUL:
+            return "WHOOOO! *spins and dances* ♪ ♫ ♬ Woohoo! ♬ ♫ ♪"
+        elif self.personality == config.PERSONALITY_SHY:
+            return "*blushes* I-I'll try to dance... *starts swaying shyly*"
+        elif self.personality == config.PERSONALITY_GRUMPY:
+            return "*sighs* You want me to dance? Fine... *starts moving*"
+        else:
+            return "*starts dancing* ♪ La la la! ♪ *twirls around*"
+    
+    def do_follow(self, mouse_pos):
+        """Make character follow the player/mouse."""
+        if mouse_pos:
+            self.target_x = mouse_pos[0]
+            self.target_y = mouse_pos[1]
+            self.speed = 3  # Slightly faster than normal following
+            
+        self.state = 'following'
+        self.following = True
+        
+        if self.personality == config.PERSONALITY_SHY:
+            return "O-okay, I'll follow you... *stays close behind*"
+        elif self.personality == config.PERSONALITY_GRUMPY:
+            return "*grumbles* Fine, I'll follow you... *walks behind*"
+        else:
+            return "Okay! I'll follow you! *walks alongside*"
+    
+    def do_come_here(self, mouse_pos):
+        """Make character come to the player."""
+        if mouse_pos:
+            self.target_x = mouse_pos[0]
+            self.target_y = mouse_pos[1]
+            self.speed = 5  # Run to player
+            
+            # Use pathfinding if available
+            if self.world and self.world.pathfinding:
+                path = self.world.find_path(self.x, self.y, self.target_x, self.target_y)
+                if path:
+                    self.set_path(path)
+        
+        if self.personality == config.PERSONALITY_PLAYFUL:
+            return "Coming! *runs over excitedly*"
+        elif self.personality == config.PERSONALITY_SHY:
+            return "*nods* C-coming... *walks over shyly*"
+        elif self.personality == config.PERSONALITY_GRUMPY:
+            return "*walks over* What's the matter? *sighs*"
+        else:
+            return "I'm coming! *walks over*"
+    
+    def do_stay(self):
+        """Make character stay in place (move away)."""
+        # Move a bit away from current position
+        angle = random.uniform(0, 2 * math.pi)
+        distance = 150
+        self.target_x = self.x + math.cos(angle) * distance
+        self.target_y = self.y + math.sin(angle) * distance
+        
+        # Keep in bounds
+        self.target_x = max(50, min(1550, self.target_x))
+        self.target_y = max(150, min(1150, self.target_y))
+        
+        self.state = 'idle'
+        self.following = False
+        
+        if self.personality == config.PERSONALITY_PLAYFUL:
+            return "Aww, okay! I'll stay here and wait! *sits*"
+        elif self.personality == config.PERSONALITY_SHY:
+            return "O-okay, I'll stay here... *sits quietly*"
+        elif self.personality == config.PERSONALITY_GRUMPY:
+            return "Finally, some peace and quiet... *sits*"
+        else:
+            return "Okay, I'll stay here! *sits down*"
+    
     def draw(self, surface, current_time=0):
         """Draw the character (legacy - uses stored position)."""
         self.draw_at(surface, self.x, self.y, current_time)
@@ -667,6 +1192,9 @@ class Character(Sprite):
         if self.sparkle_timer > 0:
             self.draw_sparkles(surface, draw_x, draw_y)
             self.sparkle_timer -= 1
+        
+        # Draw relationship particles (hearts/storms)
+        self.draw_particles(surface, draw_x, draw_y)
         
         # Draw name label
         font = pygame.font.Font(None, 24)
@@ -782,6 +1310,30 @@ class Character(Sprite):
                 pygame.draw.circle(surface, (255, 255, 150), 
                                  (int(sx), int(sy)), 3)
     
+    def draw_particles(self, surface, screen_x, screen_y):
+        """Draw heart and storm particles around character."""
+        # Draw hearts
+        for heart in self.heart_particles:
+            screen_heart_x = screen_x + (heart['x'] - self.x)
+            screen_heart_y = screen_y + (heart['y'] - self.y)
+            alpha = int(heart['life'] / 60 * 255)
+            # Draw heart shape
+            heart_color = (255, 100, 150)
+            pygame.draw.circle(surface, heart_color, (int(screen_heart_x), int(screen_heart_y)), 5)
+            pygame.draw.circle(surface, heart_color, (int(screen_heart_x - 4), int(screen_heart_y - 2)), 4)
+            pygame.draw.circle(surface, heart_color, (int(screen_heart_x + 4), int(screen_heart_y - 2)), 4)
+        
+        # Draw storm clouds
+        for cloud in self.storm_particles:
+            screen_cloud_x = screen_x + (cloud['x'] - self.x)
+            screen_cloud_y = screen_y + (cloud['y'] - self.y)
+            alpha = int(cloud['life'] / 45 * 150)
+            cloud_color = (80, 80, 80)
+            # Draw cloud puffs
+            pygame.draw.circle(surface, cloud_color, (int(screen_cloud_x), int(screen_cloud_y)), 8)
+            pygame.draw.circle(surface, cloud_color, (int(screen_cloud_x - 6), int(screen_cloud_y + 2)), 6)
+            pygame.draw.circle(surface, cloud_color, (int(screen_cloud_x + 6), int(screen_cloud_y + 2)), 6)
+    
     def set_speech_bubble(self, text, current_time):
         """Set a speech bubble to display above the character."""
         self.speech_bubble_text = text
@@ -809,35 +1361,50 @@ class Character(Sprite):
         if opacity <= 0:
             return
         
-        # Font setup
-        font = pygame.font.Font(None, 24)
-        text_surface = font.render(self.speech_bubble_text, True, (30, 30, 30))
+        # Font setup - larger font for clearer text
+        font = pygame.font.Font(None, 28)
+        text_color = (20, 20, 20)  # Darker text for better readability
+        text_surface = font.render(self.speech_bubble_text, True, text_color)
         text_rect = text_surface.get_rect()
         
         # Bubble dimensions - use screen coordinates
-        bubble_padding = 15
-        bubble_width = text_rect.width + bubble_padding * 2
+        bubble_padding = 12
+        bubble_width = max(150, text_rect.width + bubble_padding * 2)
         bubble_height = text_rect.height + bubble_padding * 2
         bubble_x = screen_x - bubble_width // 2
-        bubble_y = screen_y - self.radius - bubble_height - 20
+        bubble_y = screen_y - self.radius - bubble_height - 25
         
         # Keep bubble on screen
         bubble_x = max(10, min(config.SCREEN_WIDTH - bubble_width - 10, bubble_x))
         bubble_y = max(10, bubble_y)
         
-        # Draw bubble background with alpha
+        # Draw bubble background with slight transparency
         bubble_surface = pygame.Surface((bubble_width, bubble_height), pygame.SRCALPHA)
-        bubble_surface.fill((255, 255, 245, opacity))
+        # White background with slight transparency
+        bubble_surface.fill((255, 255, 255, 230))
         
-        # Draw border
-        pygame.draw.rect(bubble_surface, (80, 80, 80, opacity), 
-                        (0, 0, bubble_width, bubble_height), 2)
+        # Draw border - dark gray
+        pygame.draw.rect(bubble_surface, (60, 60, 60), 
+                        (0, 0, bubble_width, bubble_height), 3)
         
+        # Draw the bubble onto the main surface first
         surface.blit(bubble_surface, (bubble_x, bubble_y))
         
-        # Draw text with opacity
-        text_surface.set_alpha(opacity)
-        surface.blit(text_surface, (bubble_x + bubble_padding, bubble_y + bubble_padding))
+        # Draw bubble tail pointing to character
+        tail_points = [
+            (screen_x - 10, bubble_y + bubble_height),
+            (screen_x + 10, bubble_y + bubble_height),
+            (screen_x, bubble_y + bubble_height + 12)
+        ]
+        tail_surface = pygame.Surface((20, 15), pygame.SRCALPHA)
+        pygame.draw.polygon(tail_surface, (255, 255, 255, 230), [(0, 0), (20, 0), (10, 15)])
+        surface.blit(tail_surface, (screen_x - 10, bubble_y + bubble_height - 3))
+        pygame.draw.polygon(surface, (60, 60, 60), tail_points, 2)
+        
+        # Draw text (fully opaque for clarity)
+        text_x = bubble_x + bubble_padding
+        text_y = bubble_y + bubble_padding
+        surface.blit(text_surface, (text_x, text_y))
     
     # ============================================
     # Command-related methods

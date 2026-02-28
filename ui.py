@@ -9,7 +9,7 @@ import config
 
 
 class InputBox:
-    """Text input box for player messages."""
+    """Text input box for player messages with multi-line support."""
     
     def __init__(self, x=None, y=None, width=None, height=None):
         if x is None:
@@ -19,14 +19,40 @@ class InputBox:
         if width is None:
             width = config.SCREEN_WIDTH - config.INPUT_BOX_MARGIN * 2
         if height is None:
-            height = config.INPUT_BOX_HEIGHT
+            height = config.INPUT_BOX_HEIGHT * 3  # Make taller for multi-line
             
         self.rect = pygame.Rect(x, y, width, height)
         self.text = ""
         self.active = False
         self.font = pygame.font.Font(None, 26)
         self.placeholder = "Type a message... (/all for global, /help for commands)"
-        self.max_length = 100
+        self.max_length = 200
+    
+    def _wrap_text(self, text):
+        """Wrap text to fit within the box width."""
+        if not text:
+            return []
+        
+        words = text.split()
+        lines = []
+        current_line = []
+        max_width = self.rect.width - 30  # Leave padding
+        
+        for word in words:
+            test_line = ' '.join(current_line + [word])
+            test_surface = self.font.render(test_line, True, (30, 30, 30))
+            
+            if test_surface.get_width() <= max_width:
+                current_line.append(word)
+            else:
+                if current_line:
+                    lines.append(' '.join(current_line))
+                current_line = [word]
+        
+        if current_line:
+            lines.append(' '.join(current_line))
+        
+        return lines
     
     def handle_event(self, event):
         """Handle keyboard events for the input box."""
@@ -58,7 +84,7 @@ class InputBox:
         return self.rect.collidepoint(pos)
     
     def draw(self, surface):
-        """Draw the input box."""
+        """Draw the input box with multi-line text."""
         # Box background
         if self.active:
             box_color = config.INPUT_BOX_COLOR
@@ -68,14 +94,18 @@ class InputBox:
             box_color = (240, 240, 240)
             border_color = config.INPUT_BOX_BORDER
             border_width = 2
-            
+        
         pygame.draw.rect(surface, box_color, self.rect)
         pygame.draw.rect(surface, border_color, self.rect, border_width)
         
-        # Draw input text or placeholder
+        # Draw wrapped text or placeholder
         if self.text:
-            text_surface = self.font.render(self.text, True, (30, 30, 30))
-            surface.blit(text_surface, (self.rect.x + 10, self.rect.y + 10))
+            lines = self._wrap_text(self.text)
+            y_offset = self.rect.y + 8
+            for line in lines[:5]:  # Show max 5 lines
+                text_surface = self.font.render(line, True, (30, 30, 30))
+                surface.blit(text_surface, (self.rect.x + 10, y_offset))
+                y_offset += self.font.get_height() + 4
         else:
             placeholder_surface = self.font.render(self.placeholder, True, (150, 150, 150))
             surface.blit(placeholder_surface, (self.rect.x + 10, self.rect.y + 10))
@@ -278,6 +308,31 @@ def draw_ui_overlay(surface, font, input_font, selected_character, ai_chat, curr
         selection_surface = input_font.render(selection_text, True, (50, 100, 50))
         surface.blit(selection_surface, (config.SCREEN_WIDTH // 2 - selection_surface.get_width() // 2, 
                                           config.SCREEN_HEIGHT - config.INPUT_BOX_HEIGHT - config.INPUT_BOX_MARGIN - 30))
+        
+        # Draw relationship indicator
+        if hasattr(selected_character, 'player_relationship'):
+            rel = selected_character.player_relationship
+            rel_level = selected_character.get_relationship_level()
+            
+            # Determine relationship color
+            if rel >= 70:
+                rel_color = (200, 50, 100)
+                rel_emoji = "❤️"
+            elif rel >= 40:
+                rel_color = (100, 150, 50)
+                rel_emoji = "💚"
+            elif rel >= 20:
+                rel_color = (150, 150, 50)
+                rel_emoji = "💛"
+            else:
+                rel_color = (150, 50, 50)
+                rel_emoji = "💔"
+            
+            level_str = rel_level.replace('_', ' ')
+            rel_text = f"{rel_emoji} Friendship: {rel}/100 ({level_str})"
+            rel_surface = input_font.render(rel_text, True, rel_color)
+            surface.blit(rel_surface, (config.SCREEN_WIDTH // 2 - rel_surface.get_width() // 2, 
+                                        config.SCREEN_HEIGHT - config.INPUT_BOX_HEIGHT - config.INPUT_BOX_MARGIN - 55))
     else:
         selection_text = "Select a character to chat, or use /all to ask everyone!"
         selection_surface = input_font.render(selection_text, True, (120, 80, 80))

@@ -1,0 +1,12 @@
+# Virtual Pet Game - Android Dependencies
+# Requirements for building with PGS4A (Pygame Subset for Android)
+
+# Core requirements
+pygame==2.5.2
+
+# For AI chat functionality
+requests>=2.28.0
+
+# For PGS4A Android build (install via pgs4a tools)
+# Run: pgs4a install android
+# Then copy the android/ directory to your project

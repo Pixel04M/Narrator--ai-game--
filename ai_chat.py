@@ -2,6 +2,7 @@
 AI Chat System for Virtual Pet Game
 ===================================
 Handles AI responses using Fireworks AI API and rule-based fallbacks.
+Includes natural language action command detection.
 """
 
 import pygame
@@ -19,6 +20,113 @@ except ImportError:
     print("Install with: pip install requests")
 
 import config
+
+
+# ============================================
+# ACTION DETECTION SYSTEM
+# ============================================
+
+class ActionDetector:
+    """Detects natural language action commands in player messages."""
+    
+    # Action patterns - maps action names to lists of regex patterns
+    ACTION_PATTERNS = {
+        'sleep': [
+            r'\bgo to sleep\b', r'\btake a nap\b', r'\bsleep now\b',
+            r'\bgo to bed\b', r'\blie down\b', r'\brest\b',
+            r'\bsleep\b', r'\bsleeping\b', r'\bnap\b'
+        ],
+        'eat': [
+            r'\beat\b', r'\bfeed me\b', r"i'm hungry\b", r'\bi am hungry\b',
+            r'\bhave some food\b', r'\bget food\b', r'\bgo eat\b',
+            r'\bhungry\b', r'\bfood\b', r'\bhave dinner\b', r'\bhave lunch\b',
+            r'\bhave breakfast\b', r'\beating\b'
+        ],
+        'play': [
+            r'\bplay\b', r'\bplay with\b', r'\bhave fun\b',
+            r'\btoys?\b', r'\bgame\b', r'\bplaying\b',
+            r'\bhave a play\b', r'\blets? play\b', r'\bcome play\b'
+        ],
+        'dance': [
+            r'\bdance\b', r'\bdancing\b', r'\bdance for\b',
+            r'\bdo a dance\b', r'\bmove\b', r'\bboogie\b'
+        ],
+        'follow': [
+            r'\bfollow me\b', r'\bfollow\b', r'\bstay with me\b',
+            r'\bkeep up\b', r'\bcome with\b', r'\bgo with me\b',
+            r'\bwalk with\b', r'\bby my side\b'
+        ],
+        'come': [
+            r'\bcome here\b', r'\bcome over\b', r'\bcome to me\b',
+            r'\bcome on\b', r'\bover here\b', r'\bget over here\b'
+        ],
+        'stay': [
+            r'\bstay\b', r'\bgo away\b', r'\bleave me alone\b',
+            r'\bstop following\b', r'\bgo back\b', r'\bgo over there\b',
+            r'\baway\b', r'\bgo off\b'
+        ]
+    }
+    
+    def __init__(self):
+        self.last_action = None
+        self.action_confirmed = {
+            'sleep': "Okay, I'm going to sleep... *yawns* Zzz...",
+            'eat': "Food? Yay! *runs to food bowl* I'm so hungry!",
+            'play': "Yay! Let's play! *bounces excitedly*",
+            'dance': "*starts dancing* ♪ ♫ ♬ Woohoo! ♬ ♫ ♪",
+            'follow': "Okay, I'll follow you! *walks alongside*",
+            'come': "Coming! *runs over*",
+            'stay': "Okay, I'll stay here. *sits down*"
+        }
+        
+        # Grumpy personality responses
+        self.grumpy_action_confirmed = {
+            'sleep': "*yawns* Fine, I guess I'll rest a bit...",
+            'eat': "*grumbles* Food? Well, I AM hungry... *walks to bowl*",
+            'play': "*sighs* I guess we can play... *reluctantly bounces*",
+            'dance': "*rolls eyes* This better be worth it... *starts swaying*",
+            'follow': "*sighs* Fine, I'll follow you around...",
+            'come': "*walks over* You better have a good reason...",
+            'stay': "*sits* Finally, some peace and quiet..."
+        }
+        
+        # Shy personality responses
+        self.shy_action_confirmed = {
+            'sleep': "O-okay... *quietly walks to bed* Goodnight...",
+            'eat': "*nods* I-I'll go eat... *quietly heads to food*",
+            'play': "*gasps* P-play? W-with me? *happy bounce*",
+            'dance': "*blushes* D-dance? I-I'm not good at dancing... *starts swaying*",
+            'follow': "O-okay, I'll follow you... *stays close*",
+            'come': "*nods* C-coming... *walks over shyly*",
+            'stay': "O-okay, I'll s-stay here... *sits quietly*"
+        }
+    
+    def detect_action(self, message):
+        """Detect if the message contains an action command.
+        
+        Returns: (action_name, confidence) or (None, 0)
+        """
+        msg_lower = message.lower()
+        
+        # Check each action pattern
+        for action_name, patterns in self.ACTION_PATTERNS.items():
+            for pattern in patterns:
+                if re.search(pattern, msg_lower):
+                    self.last_action = action_name
+                    return action_name, 0.9  # High confidence when pattern matches
+        
+        return None, 0
+    
+    def get_action_confirmation(self, action, personality):
+        """Get a personality-appropriate confirmation message for an action."""
+        base_confirmed = self.action_confirmed.get(action, "Okay!")
+        
+        if personality == config.PERSONALITY_GRUMPY:
+            return self.grumpy_action_confirmed.get(action, base_confirmed)
+        elif personality == config.PERSONALITY_SHY:
+            return self.shy_action_confirmed.get(action, base_confirmed)
+        
+        return base_confirmed
 
 
 def clean_ai_response(text):
@@ -114,6 +222,21 @@ class AIChat:
             self.conversation_history[character_name] = [
                 {"role": "system", "content": system_prompt}
             ]
+        
+        # Update system prompt with player relationship info if character has it
+        if all_characters:
+            for char in all_characters:
+                if char.name == character_name and hasattr(char, 'player_relationship'):
+                    rel_info = char.get_relationship_prompt_info()
+                    # Update the system prompt with relationship info
+                    history = self.conversation_history[character_name]
+                    if history and history[0]['role'] == 'system':
+                        original_prompt = history[0]['content']
+                        # Check if we already added relationship info
+                        if "Relationship with player:" not in original_prompt:
+                            history[0]['content'] = original_prompt + " " + rel_info
+                    break
+        
         return self.conversation_history[character_name]
     
     def _get_global_system_prompt(self, characters):
@@ -326,12 +449,16 @@ class ChatSystem:
     """AI Chat System that generates responses based on character personality.
     
     This system can use either real AI (via API) or rule-based responses.
+    Includes action detection for natural language commands.
     """
     
     def __init__(self, ai_chat=None):
         # Link to AI chat system (if available)
         self.ai_chat = ai_chat
         self.pending_callbacks = {}  # Store callbacks for async AI responses
+        
+        # Action detection system
+        self.action_detector = ActionDetector()
         
         # Response templates for each personality
         self.fifi_responses = [
