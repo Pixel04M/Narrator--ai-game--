@@ -158,23 +158,25 @@ def get_responsive_scale():
 
 def toggle_fullscreen(screen, current_flags):
     """Toggle between fullscreen and windowed mode.
-    
+
     Args:
         screen: The pygame display surface
         current_flags: Current display flags
-        
+
     Returns:
         tuple: (new_screen, new_flags)
     """
     if current_flags & pygame.FULLSCREEN:
-        # Exit fullscreen
-        new_flags = current_flags & ~pygame.FULLSCREEN
+        # Exit fullscreen - return to fixed window
+        new_flags = pygame.RESIZABLE
+        new_screen = pygame.display.set_mode(
+            (config.SCREEN_WIDTH, config.SCREEN_HEIGHT), new_flags)
     else:
-        # Enter fullscreen
-        new_flags = current_flags | pygame.FULLSCREEN
-    
-    # Recreate the screen with new flags
-    new_screen = pygame.display.set_mode((screen.get_width(), screen.get_height()), new_flags)
+        # Enter fullscreen using SCALED so the 800x600 game
+        # is hardware-scaled to any screen without black bars or lag
+        new_flags = pygame.FULLSCREEN | pygame.SCALED
+        new_screen = pygame.display.set_mode(
+            (config.SCREEN_WIDTH, config.SCREEN_HEIGHT), new_flags)
     return new_screen, new_flags
 
 
@@ -194,12 +196,10 @@ def main(android_mode=False):
     else:
         screen_width, screen_height = config.SCREEN_WIDTH, config.SCREEN_HEIGHT
     
-    # Set up screen
-    screen = pygame.display.set_mode((screen_width, screen_height))
+    # Set up screen - start fullscreen using SCALED (scales 800x600 to any monitor)
+    display_flags = pygame.FULLSCREEN | pygame.SCALED
+    screen = pygame.display.set_mode((screen_width, screen_height), display_flags)
     pygame.display.set_caption(config.GAME_CAPTION)
-    
-    # Track display flags for fullscreen toggle
-    display_flags = pygame.RESIZABLE
     
     # Create clock
     clock = pygame.time.Clock()
@@ -707,39 +707,47 @@ def main(android_mode=False):
         # Draw everything
         # Draw world background
         game_world.draw(screen)
-        
+
         # Draw world objects
         game_world.draw_objects(screen)
-        
-        # Draw all characters with current time for speech bubbles
+
+        # Draw all character bodies (no speech bubbles yet so bubbles are never
+        # hidden behind another character's body)
+        char_screen_positions = []
         for char in characters:
-            # Convert world position to screen for drawing
             screen_x, screen_y = game_world.camera.world_to_screen(char.x, char.y)
-            char.draw_at(screen, screen_x, screen_y, current_time)
-        
+            char_screen_positions.append((char, screen_x, screen_y))
+            char.draw_at(screen, screen_x, screen_y, current_time, skip_bubble=True)
+
         # Draw input box
         input_box.draw(screen)
-        
+
         # Draw UI overlay
         ui.draw_ui_overlay(
-            screen, font, input_font, 
+            screen, font, input_font,
             selected_character, ai_chat, current_time
         )
-        
+
         # Draw command feedback
         if command_feedback_timer > 0:
             ui.draw_command_feedback(screen, font, command_feedback)
-        
+
         # Draw narrator
         narrator.draw(screen, current_time)
-        
+
         # Draw minimap
         if config.MINIMAP_ENABLED:
             minimap.draw(screen, characters)
-        
+
         # Draw Android-specific UI hints
         if android_mode:
             draw_android_hints(screen)
+
+        # Draw speech bubbles on top of EVERYTHING so they are never obscured
+        for char, screen_x, screen_y in char_screen_positions:
+            draw_x = screen_x + char.shake_offset
+            draw_y = screen_y + char.bounce_offset
+            char.draw_speech_bubble(screen, draw_x, draw_y, current_time)
         
         # Update display
         pygame.display.flip()

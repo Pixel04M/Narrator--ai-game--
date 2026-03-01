@@ -1287,7 +1287,7 @@ class Character(Sprite):
         """Draw the character (legacy - uses stored position)."""
         self.draw_at(surface, self.x, self.y, current_time)
     
-    def draw_at(self, surface, screen_x, screen_y, current_time=0):
+    def draw_at(self, surface, screen_x, screen_y, current_time=0, skip_bubble=False):
         """Draw the character at a specific screen position."""
         # Apply shake offset for angry/tantrum states
         draw_x = screen_x + self.shake_offset
@@ -1337,8 +1337,8 @@ class Character(Sprite):
         emoji_rect = emoji_surface.get_rect(center=(draw_x + 25, draw_y - self.radius - 15))
         surface.blit(emoji_surface, emoji_rect)
         
-        # Draw speech bubble if active
-        if current_time > 0:
+        # Draw speech bubble if active (skip when caller draws bubbles separately)
+        if current_time > 0 and not skip_bubble:
             self.draw_speech_bubble(surface, draw_x, draw_y, current_time)
     
     def draw_face(self, surface, x, y):
@@ -1484,56 +1484,70 @@ class Character(Sprite):
         """Draw a speech bubble above the character at the given screen position."""
         if not self.has_active_speech_bubble(current_time):
             return
-        
-        # Get opacity for fading
+
         opacity = self.get_speech_bubble_opacity(current_time)
         if opacity <= 0:
             return
-        
-        # Font setup - larger font for clearer text
+
         font = pygame.font.Font(None, 28)
-        text_color = (20, 20, 20)  # Darker text for better readability
-        text_surface = font.render(self.speech_bubble_text, True, text_color)
-        text_rect = text_surface.get_rect()
-        
-        # Bubble dimensions - use screen coordinates
+        text_color = (20, 20, 20)
         bubble_padding = 12
-        bubble_width = max(150, text_rect.width + bubble_padding * 2)
-        bubble_height = text_rect.height + bubble_padding * 2
-        bubble_x = screen_x - bubble_width // 2
-        bubble_y = screen_y - self.radius - bubble_height - 25
-        
+        max_bubble_width = 280
+        max_text_width = max_bubble_width - bubble_padding * 2
+
+        # Wrap text into lines that fit within max_text_width
+        words = self.speech_bubble_text.split(' ')
+        lines = []
+        current_line = []
+        for word in words:
+            test = font.render(' '.join(current_line + [word]), True, text_color)
+            if test.get_width() <= max_text_width:
+                current_line.append(word)
+            else:
+                if current_line:
+                    lines.append(' '.join(current_line))
+                current_line = [word]
+        if current_line:
+            lines.append(' '.join(current_line))
+        if not lines:
+            return
+
+        line_height = font.get_height() + 3
+        actual_widths = [font.render(l, True, text_color).get_width() for l in lines]
+        bubble_width = max(120, max(actual_widths) + bubble_padding * 2)
+        bubble_height = len(lines) * line_height + bubble_padding * 2
+
+        bubble_x = int(screen_x) - bubble_width // 2
+        bubble_y = int(screen_y) - self.radius - bubble_height - 25
+
         # Keep bubble on screen
-        bubble_x = max(10, min(config.SCREEN_WIDTH - bubble_width - 10, bubble_x))
+        screen_w = surface.get_width()
+        screen_h = surface.get_height()
+        bubble_x = max(10, min(screen_w - bubble_width - 10, bubble_x))
         bubble_y = max(10, bubble_y)
-        
-        # Draw bubble background with slight transparency
+
+        # Draw bubble background
         bubble_surface = pygame.Surface((bubble_width, bubble_height), pygame.SRCALPHA)
-        # White background with slight transparency
         bubble_surface.fill((255, 255, 255, 230))
-        
-        # Draw border - dark gray
-        pygame.draw.rect(bubble_surface, (60, 60, 60), 
-                        (0, 0, bubble_width, bubble_height), 3)
-        
-        # Draw the bubble onto the main surface first
+        pygame.draw.rect(bubble_surface, (60, 60, 60), (0, 0, bubble_width, bubble_height), 3)
         surface.blit(bubble_surface, (bubble_x, bubble_y))
-        
-        # Draw bubble tail pointing to character
+
+        # Draw tail (clamped to bubble bounds so it always points correctly)
+        tail_x = max(bubble_x + 14, min(int(screen_x), bubble_x + bubble_width - 14))
         tail_points = [
-            (screen_x - 10, bubble_y + bubble_height),
-            (screen_x + 10, bubble_y + bubble_height),
-            (screen_x, bubble_y + bubble_height + 12)
+            (tail_x - 10, bubble_y + bubble_height),
+            (tail_x + 10, bubble_y + bubble_height),
+            (tail_x, bubble_y + bubble_height + 12)
         ]
-        tail_surface = pygame.Surface((20, 15), pygame.SRCALPHA)
-        pygame.draw.polygon(tail_surface, (255, 255, 255, 230), [(0, 0), (20, 0), (10, 15)])
-        surface.blit(tail_surface, (screen_x - 10, bubble_y + bubble_height - 3))
+        tail_surf = pygame.Surface((20, 15), pygame.SRCALPHA)
+        pygame.draw.polygon(tail_surf, (255, 255, 255, 230), [(0, 0), (20, 0), (10, 15)])
+        surface.blit(tail_surf, (tail_x - 10, bubble_y + bubble_height - 3))
         pygame.draw.polygon(surface, (60, 60, 60), tail_points, 2)
-        
-        # Draw text (fully opaque for clarity)
-        text_x = bubble_x + bubble_padding
-        text_y = bubble_y + bubble_padding
-        surface.blit(text_surface, (text_x, text_y))
+
+        # Draw each wrapped line
+        for i, line in enumerate(lines):
+            line_surf = font.render(line, True, text_color)
+            surface.blit(line_surf, (bubble_x + bubble_padding, bubble_y + bubble_padding + i * line_height))
     
     # ============================================
     # Command-related methods
