@@ -91,6 +91,13 @@ class Character(Sprite):
         self.action_outcomes = {}
         self.curiosity = 50
         self.last_interaction_object = None
+
+        # === AGENT-TO-AGENT DIALOGUE ===
+        self.last_agent_dialogue_time = {}  # other_name -> timestamp
+        self._pending_agent_speech = None   # Set by background AI thread, drained by game loop
+        self._ai_chat_ref = None            # Injected by game.py after init
+        self.pending_invite = None          # Name of character being invited
+        self._pending_invite_message = None # Message to display
         
         # Create surface for the character
         self.image = pygame.Surface((self.radius * 2 + 40, self.radius * 2 + 60), pygame.SRCALPHA)
@@ -153,7 +160,10 @@ class Character(Sprite):
             self.update_grumpy_ai(mouse_pos, time_since_interaction, world)
         elif self.personality == config.PERSONALITY_PLAYFUL:
             self.update_playful_ai(mouse_pos, time_since_interaction, world)
-        
+
+        # Continuous behavior reactions based on nearby agents' states
+        self.update_behavior_reactions(all_characters, current_time)
+
         # Check needs-based states
         if self.state not in ['happy', 'angry', 'scared', 'hiding', 'tantrum', 'playing', 'dancing', 'lined', 'seeking', 'following', 'sleeping', 'eating']:
             if self.hunger > 70:
@@ -479,14 +489,16 @@ class Character(Sprite):
         if other.name not in self.relationships:
             # Initialize relationship based on personality
             self.initialize_relationship(other)
-        
+
         # Update meeting time
         self.last_meeting_times[other.name] = current_time
         self.last_meeting_time = current_time
         self.last_met_character = other
-        
+
         # Adjust relationship based on behavior
         self.interact_with_character(other, current_time)
+        # Apply emotional state contagion
+        self.apply_emotional_contagion(other)
     
     def initialize_relationship(self, other):
         """Initialize relationship based on personalities."""
@@ -512,27 +524,46 @@ class Character(Sprite):
         """Interact with another character (share info, etc.)."""
         if not other or other == self:
             return
-        
+
         rel = self.relationships.get(other.name, 0)
-        
+
         # Fifi shares info with friends
         if self.personality == config.PERSONALITY_FRIENDLY:
             if rel > 30:
                 self.share_info_with(other)
-        
+
         # Pippin invites others to play
         if self.personality == config.PERSONALITY_PLAYFUL:
             if rel > 20 and random.random() < 0.3:
                 self.invite_to_play(other)
-        
+
         # Grump doesn't share
         if self.personality == config.PERSONALITY_GRUMPY:
-            return  # Grump doesn't interact
-        
+            pass  # Grump doesn't share info — but still gets agent dialogue below
+
         # Shyel shares only if comfortable
         if self.personality == config.PERSONALITY_SHY:
             if rel > 40:
                 self.share_info_with(other)
+
+        # Agent-to-agent AI dialogue (rate-limited to 30s per pair)
+        _AGENT_DIALOGUE_COOLDOWN = 30000
+        last_said = self.last_agent_dialogue_time.get(other.name, 0)
+        if (current_time - last_said > _AGENT_DIALOGUE_COOLDOWN
+                and self._ai_chat_ref is not None
+                and self._ai_chat_ref.is_available):
+            self.last_agent_dialogue_time[other.name] = current_time
+            context = {
+                'listener_state': other.state,
+                'relationship': rel
+            }
+            speaker = self  # capture for closure
+
+            def _on_agent_response(text):
+                if text:
+                    speaker._pending_agent_speech = text
+
+            self._ai_chat_ref.generate_agent_dialogue(self, other, context, _on_agent_response)
     
     def share_info_with(self, other):
         """Share discovered information with another character."""
@@ -551,7 +582,106 @@ class Character(Sprite):
         """Remember a location shared by another character."""
         if obj_type in self.known_locations and self.known_locations[obj_type] is None:
             self.known_locations[obj_type] = location
-    
+
+    def apply_emotional_contagion(self, other):
+        """Adjust this character's stats based on another character's current emotional state.
+
+        Called once per meeting event (rate-limited to 10s via meet_character).
+        Each personality pair has specific reactions defined by the character lore.
+        """
+        if self.personality == config.PERSONALITY_FRIENDLY:
+            # Fifi is uplifted by Pippin's joy
+            if other.state in ('playing', 'dancing', 'happy') and other.personality == config.PERSONALITY_PLAYFUL:
+                self.happiness = min(100, self.happiness + 8)
+            # Fifi is saddened by Grump's tantrum and moves to comfort
+            if other.state == 'tantrum':
+                self.happiness = max(0, self.happiness - 5)
+                comfort_x = other.x + random.randint(-60, 60)
+                comfort_y = other.y + random.randint(-60, 60)
+                self.target_x = max(50, min(1550, comfort_x))
+                self.target_y = max(150, min(1150, comfort_y))
+                self.speed = config.SEEKING_SPEED
+
+        elif self.personality == config.PERSONALITY_SHY:
+            # Shyel is frightened by Grump's tantrum
+            if other.state == 'tantrum' and other.personality == config.PERSONALITY_GRUMPY:
+                self.happiness = max(0, self.happiness - 12)
+                self.state = 'scared'
+                self.seek_object('tree', self.world)
+            # Shyel is calmed by Fifi's happiness
+            if other.state in ('happy', 'idle') and other.personality == config.PERSONALITY_FRIENDLY:
+                self.happiness = min(100, self.happiness + 4)
+
+        elif self.personality == config.PERSONALITY_GRUMPY:
+            # Grump is annoyed by Pippin's energy
+            if other.state in ('playing', 'dancing') and other.personality == config.PERSONALITY_PLAYFUL:
+                self.happiness = max(0, self.happiness - 3)
+            # Grump secretly feels better when Fifi is happy
+            if other.state == 'happy' and other.personality == config.PERSONALITY_FRIENDLY:
+                self.happiness = min(100, self.happiness + 2)
+
+        elif self.personality == config.PERSONALITY_PLAYFUL:
+            # Pippin is energized by anyone dancing or happy
+            if other.state in ('happy', 'dancing'):
+                self.happiness = min(100, self.happiness + 6)
+                if self.state == 'idle':
+                    self.state = 'playing'
+                    self.bounce_timer = 90
+
+    def update_behavior_reactions(self, all_characters, current_time):
+        """Continuous per-frame behavior driven by other agents' observed states.
+
+        Unlike emotional contagion (which fires on meeting events), this runs every
+        frame and drives movement decisions for nearby agents within sight range.
+        Probabilities are scaled for 60 FPS — p = 1 / (target_seconds * 60).
+        """
+        for other in all_characters:
+            if other == self:
+                continue
+            dist = math.hypot(other.x - self.x, other.y - self.y)
+            if dist > 300:  # Sight range
+                continue
+
+            # --- Grump tantrum reactions ---
+            if other.state == 'tantrum' and other.personality == config.PERSONALITY_GRUMPY:
+                if self.personality == config.PERSONALITY_SHY and self.state not in ('hiding', 'scared', 'seeking'):
+                    # Shyel auto-flees to nearest tree
+                    self.state = 'scared'
+                    self.seek_object('tree', self.world)
+                    self.hide_timer = 240  # 4 seconds hiding
+
+                elif self.personality == config.PERSONALITY_FRIENDLY and self.state == 'idle':
+                    # Fifi drifts toward Grump to comfort (~every 5s: p = 1/300)
+                    if random.random() < 0.003:
+                        comfort_x = other.x + random.choice([-80, 80])
+                        comfort_y = other.y + random.choice([-60, 60])
+                        self.target_x = max(50, min(1550, comfort_x))
+                        self.target_y = max(150, min(1150, comfort_y))
+                        self.speed = config.SEEKING_SPEED
+
+            # --- Pippin playing — Fifi gravitates over (~every 5s: p = 1/300) ---
+            if (other.state == 'playing' and other.personality == config.PERSONALITY_PLAYFUL
+                    and self.personality == config.PERSONALITY_FRIENDLY and self.state == 'idle'):
+                if random.random() < 0.003:
+                    self.target_x = max(50, min(1550, other.x + random.randint(-100, 100)))
+                    self.target_y = max(150, min(1150, other.y + random.randint(-80, 80)))
+                    self.speed = config.SEEKING_SPEED
+
+            # --- Grump secretly drifts toward Fifi (~every 33s: p = 1/2000) ---
+            if (self.personality == config.PERSONALITY_GRUMPY
+                    and other.personality == config.PERSONALITY_FRIENDLY
+                    and self.state == 'idle'):
+                if random.random() < 0.0005:
+                    self.target_x = max(50, min(1550, other.x + random.randint(-120, 120)))
+                    self.target_y = max(150, min(1150, other.y + random.randint(-100, 100)))
+                    self.speed = 1.0  # Slow, casual drift — not obvious
+
+        # Shyel passive happiness recovery when resting near a tree
+        if self.personality == config.PERSONALITY_SHY and self.world:
+            nearest_tree = self.world.get_nearest_object('tree', self.x, self.y, 80)
+            if nearest_tree:
+                self.happiness = min(100, self.happiness + 0.03)
+
     # =============================
     # PLAYER SENTIMENT & RELATIONSHIP SYSTEM
     # =============================
@@ -848,18 +978,17 @@ class Character(Sprite):
         return info
     
     def invite_to_play(self, other):
-        """Invite another character to play."""
+        """Invite another character to play — stores message for game loop to display."""
         if not other:
             return
-        
-        # Create speech bubble
+
         messages = [
             f"Hey {other.name}, want to play?",
             f"{other.name}! Come find toys with me!",
             "Let's have fun together!"
         ]
-        # Will be displayed by game
         self.pending_invite = other.name
+        self._pending_invite_message = random.choice(messages)
     
     def check_nearby_characters(self, all_characters, current_time):
         """Check if near other characters and potentially communicate."""
@@ -880,15 +1009,15 @@ class Character(Sprite):
         """Check for nearby objects to interact with."""
         if not world:
             return
-        
+
         interaction_range = 60
-        
+
         # Get nearest object
         obj = world.get_nearest_interactive(self.x, self.y, interaction_range)
-        if obj and obj.last_interaction_time > 0:
-            # Check cooldown
+        # last_interaction_time starts at 0 meaning never used;
+        # current_time - 0 is always > any cooldown, so first interaction is correctly allowed.
+        if obj:
             if current_time - obj.last_interaction_time > obj.interaction_cooldown:
-                # Interact!
                 if obj.interact(self, current_time):
                     self.last_interaction_object = obj
                     self.remember_object(obj)

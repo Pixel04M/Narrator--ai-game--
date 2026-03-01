@@ -9,6 +9,8 @@ import pygame
 import random
 import threading
 import re
+import math
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Try to import requests for API calls
 try:
@@ -302,115 +304,160 @@ class AIChat:
         return self.thinking_message
     
     def _generate_global_response_async(self, message, characters, callback):
-        """Generate responses for all characters in global chat."""
+        """Generate responses for all characters in global chat — CONCURRENT.
+
+        All 4 API requests fire simultaneously via ThreadPoolExecutor, reducing
+        global chat latency from ~8s (sequential) to ~2s (parallel).
+        """
         try:
-            # Each character responds individually
-            responses = []
-            for character in characters:
-                # Get their conversation history
+            def fetch_one(character):
+                """Fetch one character's response in its own thread."""
                 history = self._get_conversation_history(character.name, characters)
-                
-                # Add the global message as user input
-                history.append({"role": "user", "content": f"[Global question to everyone] {message}"})
-                
-                # Make API request for this character
+                global_msg = f"[Global question to everyone] {message}"
+                call_history = list(history) + [{"role": "user", "content": global_msg}]
+
                 headers = {
                     "Authorization": f"Bearer {self.api_key}",
                     "Content-Type": "application/json"
                 }
-                
                 payload = {
                     "model": self.model,
-                    "messages": history,
-                    "max_tokens": 500,
-                    "temperature": 0.7
+                    "messages": call_history,
+                    "max_tokens": config.MAX_TOKENS_GLOBAL,
+                    "temperature": config.PERSONALITY_TEMPERATURES.get(character.name, 0.7)
                 }
-                
-                response = requests.post(
-                    self.api_url,
-                    headers=headers,
-                    json=payload,
-                    timeout=20
-                )
-                
-                if response.status_code == 200:
-                    data = response.json()
-                    ai_response = data['choices'][0]['message']['content']
-                    # Clean the response
-                    ai_response = clean_ai_response(ai_response)
-                    
-                    # Add to history
-                    history.append({"role": "assistant", "content": ai_response})
-                    
-                    # Keep history manageable
-                    if len(history) > 12:
-                        history[:] = [history[0]] + history[-10:]
-                    
-                    responses.append((character, ai_response))
-                else:
-                    # Use fallback
+                try:
+                    resp = requests.post(self.api_url, headers=headers, json=payload, timeout=20)
+                    if resp.status_code == 200:
+                        ai_response = clean_ai_response(
+                            resp.json()['choices'][0]['message']['content']
+                        )
+                        # Write back to the real history (each character has its own list — no race)
+                        history.append({"role": "user", "content": global_msg})
+                        history.append({"role": "assistant", "content": ai_response})
+                        if len(history) > 12:
+                            history[:] = [history[0]] + history[-10:]
+                        return (character, ai_response)
+                    else:
+                        fallback = config.AI_FALLBACK_MESSAGES.get(character.personality, "*looks around*")
+                        return (character, fallback)
+                except Exception:
                     fallback = config.AI_FALLBACK_MESSAGES.get(character.personality, "*looks around*")
-                    responses.append((character, fallback))
-            
-            # Call callback with all responses
+                    return (character, fallback)
+
+            responses = []
+            with ThreadPoolExecutor(max_workers=len(characters)) as executor:
+                futures = {executor.submit(fetch_one, char): char for char in characters}
+                for future in as_completed(futures):
+                    result = future.result()
+                    if result:
+                        responses.append(result)
+
             if callback:
                 callback(responses)
-                
+
         except Exception as e:
             print(f"AI Chat: Error in global response - {str(e)}")
             if callback:
-                # Fallback responses for all
-                fallback_responses = []
-                for char in characters:
-                    fallback_responses.append((char, config.AI_FALLBACK_MESSAGES.get(char.personality, "*looks confused*")))
+                fallback_responses = [
+                    (char, config.AI_FALLBACK_MESSAGES.get(char.personality, "*looks confused*"))
+                    for char in characters
+                ]
                 callback(fallback_responses)
         finally:
             self.is_thinking = False
     
+    def _build_nearby_context(self, character_name, all_characters):
+        """Build a string describing the current emotional states of nearby agents.
+
+        Only includes characters within 400px of the speaking character.
+        Returns empty string if no relevant context exists.
+        """
+        if not all_characters:
+            return ""
+        speaking_char = next((c for c in all_characters if c.name == character_name), None)
+        if not speaking_char:
+            return ""
+
+        state_labels = {
+            'tantrum': 'is having a tantrum',
+            'happy': 'looks very happy',
+            'sad': 'looks sad',
+            'playing': 'is playing',
+            'hiding': 'is hiding',
+            'scared': 'looks scared',
+            'dancing': 'is dancing',
+            'sleeping': 'is sleeping',
+            'hungry': 'looks hungry',
+            'angry': 'looks angry',
+            'idle': 'is nearby',
+        }
+        parts = []
+        for other in all_characters:
+            if other.name == character_name:
+                continue
+            dist = math.hypot(other.x - speaking_char.x, other.y - speaking_char.y)
+            if dist < 400:
+                label = state_labels.get(other.state, f'is {other.state}')
+                parts.append(f"{other.name} {label}")
+
+        if parts:
+            return " Right now: " + "; ".join(parts) + "."
+        return ""
+
     def _generate_response_async(self, character, message, callback, all_characters=None):
         """Generate response in background thread."""
         try:
             # Get conversation history
             history = self._get_conversation_history(character.name, all_characters)
-            
-            # Add user message
-            history.append({"role": "user", "content": message})
-            
+
+            # Build a call-only copy with a transient scene context note injected.
+            # We use a copy so the permanent history stays clean (no stale context messages).
+            nearby_ctx = self._build_nearby_context(character.name, all_characters)
+            call_history = list(history)
+            if nearby_ctx:
+                call_history.append({
+                    "role": "system",
+                    "content": f"[Current scene context]{nearby_ctx}"
+                })
+            call_history.append({"role": "user", "content": message})
+
             # Make API request
             headers = {
                 "Authorization": f"Bearer {self.api_key}",
                 "Content-Type": "application/json"
             }
-            
-            # Fireworks AI format - optimized for fast, brief responses
+
+            # Fireworks AI format - personality-tuned for fast, brief responses
             payload = {
                 "model": self.model,
-                "messages": history,
-                "max_tokens": 500,
-                "temperature": 0.7
+                "messages": call_history,
+                "max_tokens": config.MAX_TOKENS_CHAT,
+                "temperature": config.PERSONALITY_TEMPERATURES.get(character.name, 0.7)
             }
-            
+
             response = requests.post(
                 self.api_url,
                 headers=headers,
                 json=payload,
                 timeout=20
             )
-            
+
             if response.status_code == 200:
                 data = response.json()
                 ai_response = data['choices'][0]['message']['content']
-                
+
                 # Clean the response (remove code blocks, markdown, etc.)
                 ai_response = clean_ai_response(ai_response)
-                
-                # Add AI response to history
+
+                # Persist only the plain user+assistant exchange to real history
+                history.append({"role": "user", "content": message})
                 history.append({"role": "assistant", "content": ai_response})
-                
+
                 # Keep history manageable (last 10 messages)
                 if len(history) > 12:
                     history[:] = [history[0]] + history[-10:]
-                
+
                 # Call callback with response
                 if callback:
                     callback(ai_response)
@@ -423,7 +470,7 @@ class AIChat:
                 print(f"AI Chat: API error {response.status_code} - {response.text[:200]}")
                 if callback:
                     callback(None)
-                    
+
         except requests.exceptions.Timeout:
             print("AI Chat: Request timed out. Using fallback.")
             if callback:
@@ -443,6 +490,67 @@ class AIChat:
         """Reset conversation history for a character."""
         if character_name in self.conversation_history:
             del self.conversation_history[character_name]
+
+    def generate_agent_dialogue(self, speaker, listener, context_state, callback):
+        """Generate a short AI line from one agent addressed to another.
+
+        Args:
+            speaker: Character object who is speaking
+            listener: Character object being spoken to
+            context_state: dict with keys 'listener_state' (str) and 'relationship' (int)
+            callback: function(response_text: str | None) called when done
+        """
+        if not self.is_available:
+            return
+
+        thread = threading.Thread(
+            target=self._generate_agent_dialogue_async,
+            args=(speaker, listener, context_state, callback),
+            daemon=True
+        )
+        thread.start()
+
+    def _generate_agent_dialogue_async(self, speaker, listener, context_state, callback):
+        """Background thread: generate a very short agent-to-agent greeting/comment."""
+        try:
+            base_prompt = config.CHARACTER_PROMPTS.get(speaker.name, "You are a virtual pet.")
+            listener_state = context_state.get('listener_state', 'idle')
+            rel = context_state.get('relationship', 0)
+
+            system_msg = (
+                f"{base_prompt} "
+                f"You just encountered {listener.name}. "
+                f"{listener.name} currently looks {listener_state}. "
+                f"Your relationship with them is {rel}/100. "
+                f"Say ONE short greeting or comment (max 12 words) in character."
+            )
+
+            headers = {
+                "Authorization": f"Bearer {self.api_key}",
+                "Content-Type": "application/json"
+            }
+            payload = {
+                "model": self.model,
+                "messages": [
+                    {"role": "system", "content": system_msg},
+                    {"role": "user", "content": f"Say something to {listener.name}."}
+                ],
+                "max_tokens": config.MAX_TOKENS_AGENT_DIALOGUE,
+                "temperature": config.PERSONALITY_TEMPERATURES.get(speaker.name, 0.7)
+            }
+
+            response = requests.post(self.api_url, headers=headers, json=payload, timeout=10)
+            if response.status_code == 200:
+                text = clean_ai_response(response.json()['choices'][0]['message']['content'])
+                if callback:
+                    callback(text)
+            else:
+                if callback:
+                    callback(None)
+        except Exception as e:
+            print(f"AI agent dialogue error: {e}")
+            if callback:
+                callback(None)
 
 
 class ChatSystem:

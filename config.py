@@ -170,6 +170,19 @@ CHARACTER_RELATIONSHIPS = {
 # AI Chat Configuration
 # ============================================
 
+# Per-personality AI temperature (higher = more creative/random, runs at 60 FPS)
+PERSONALITY_TEMPERATURES = {
+    "Fifi":   0.75,   # Warm, friendly, slightly varied
+    "Shyel":  0.65,   # Quieter, more consistent
+    "Grump":  0.55,   # Consistent grumbling tone
+    "Pippin": 0.90    # High randomness - unpredictable fun
+}
+
+# Token limits per use case
+MAX_TOKENS_CHAT = 90            # Player <-> character (was 500 — wasteful for 1-2 sentences)
+MAX_TOKENS_AGENT_DIALOGUE = 40  # Agent <-> agent one-liners
+MAX_TOKENS_GLOBAL = 90          # /all global chat responses
+
 # AI Provider: "fireworks" (only active provider)
 AI_PROVIDER = "fireworks"
 

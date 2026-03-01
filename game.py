@@ -247,9 +247,10 @@ def main(android_mode=False):
     # Create characters with world reference
     characters = char_module.create_characters()
     
-    # Assign world reference to characters
+    # Assign world reference and AI chat reference to characters
     for char in characters:
         char.world = game_world
+        char._ai_chat_ref = ai_chat  # enables agent-to-agent AI dialogue
     
     # Track selected character
     selected_character = None
@@ -686,7 +687,19 @@ def main(android_mode=False):
         # Update all characters with world reference
         for char in characters:
             char.update_ai(mouse_pos, current_time, characters, game_world)
-        
+
+            # Display pending play invitation as speech bubble (Bug 1 fix)
+            if char.pending_invite:
+                msg = char._pending_invite_message or f"Hey {char.pending_invite}, want to play?"
+                char.set_speech_bubble(msg, current_time)
+                char.pending_invite = None
+                char._pending_invite_message = None
+
+            # Display agent-to-agent AI dialogue set by background thread
+            if char._pending_agent_speech:
+                char.set_speech_bubble(char._pending_agent_speech, current_time)
+                char._pending_agent_speech = None
+
         # Update command feedback timer
         if command_feedback_timer > 0:
             command_feedback_timer -= 1
