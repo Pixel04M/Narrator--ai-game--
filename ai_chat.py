@@ -131,30 +131,94 @@ class ActionDetector:
         return base_confirmed
 
 
+def _strip_meta_prefix(text):
+    """Remove meta-text prefixes and AI instructions that leak into dialogue.
+
+    Runs all patterns in a loop until the text stabilises, because stripping
+    one layer can reveal another (e.g. '"As Shyel: H-hi..."').
+    """
+    # Known character names for targeted stripping
+    _names = r'(?:Fifi|Shyel|Grump|Pippin)'
+
+    for _ in range(5):  # at most 5 passes
+        prev = text
+
+        # "The user wants me to..." (system prompt leak)
+        text = re.sub(r'(?i)^the\s+user\s+wants\s+.*?[.!?\n]', '', text).strip()
+
+        # "CharacterName:" / "CharacterName says:" / "CharacterName (shy):"
+        text = re.sub(rf'(?i)^{_names}\s*(\([^)]+\))?\s*(says?\s*)?:\s*', '', text).strip()
+
+        # "As [Name]," / "As a shy character," / "As Shyel, I would"
+        text = re.sub(r'(?i)^as\s+(a\s+)?[\w\s]{1,30}[,:]\s*', '', text).strip()
+
+        # "Sure! " / "Okay, " / "Well, " only when followed by meta-text indicator
+        text = re.sub(r"(?i)^(sure[!.]|okay[,.]|well[,.])\s+(?=(i'?d?\s|here|let me|my ))", '', text).strip()
+
+        # "I'd say:" / "I would respond:" / "I might reply:" / "I need to:"
+        text = re.sub(r"(?i)^(here('?s|\s+is)\s+(what\s+)?)?i'?d?\s+(say|respond|reply|tell\s+them|greet\s+them|need\s+to|should|must|can|would\s+\w+)\s*[,:.]?\s*", '', text).strip()
+
+        # "Let me respond:" / "My response:" / "My greeting:"
+        text = re.sub(r"(?i)^(let\s+me\s+\w+|my\s+(response|greeting|reply|answer))\s*[,:.]?\s*", '', text).strip()
+
+        # "[dialogue]" or "[response]" or any bracketed label
+        text = re.sub(r'^\[[\w\s]+\]\s*', '', text).strip()
+
+        # "(whispers)" / "(shyly)" — parenthesised stage directions at the very start
+        text = re.sub(r'^\([^)]{1,30}\)\s*', '', text).strip()
+
+        # Remove lines that are instructions
+        lines = text.split('\n')
+        filtered = []
+        for line in lines:
+            if re.match(r'(?i)^\s*(give|provide|output|speak|write|respond|the\s+user|note:|instruction)', line):
+                continue
+            filtered.append(line)
+        text = '\n'.join(filtered).strip()
+
+        if text == prev:
+            break
+
+    return text
+
+
 def clean_ai_response(text):
-    """Clean AI response by removing markdown code blocks and formatting artifacts."""
+    """Clean AI response by removing markdown code blocks and formatting artifacts.
+
+    NOTE: single-star *action* markers are intentionally kept because they
+    represent in-character emote/action text (e.g. '*fidgets nervously*').
+    """
     if not text:
         return text
-    
+
     # Remove markdown code blocks (```code``` or ```)
     text = re.sub(r'```[\s\S]*?```', '', text)
     text = re.sub(r'```', '', text)
-    
+
     # Remove inline code markers
     text = re.sub(r'`([^`]+)`', r'\1', text)
-    
-    # Remove any remaining markdown formatting
-    text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)  # Bold
-    text = re.sub(r'\*([^*]+)\*', r'\1', text)  # Italic
-    text = re.sub(r'__([^_]+)__', r'\1', text)  # Underline bold
-    text = re.sub(r'_([^_]+)_', r'\1', text)  # Underline italic
-    
-    # Remove any leading/trailing whitespace
+
+    # Remove bold markdown only (**text**) — single-star *text* is kept as an
+    # in-character action marker used throughout the rule-based responses too.
+    text = re.sub(r'\*\*([^*]+)\*\*', r'\1', text)  # Bold **text** → text
+    text = re.sub(r'__([^_]+)__', r'\1', text)       # Underline bold
+
+    # Strip surrounding quotes that some AI models wrap their whole response in
+    # (e.g. "Hello!" → Hello!  or """hi""" → hi)
+    # Try longest quote patterns first so triple quotes are caught before single.
     text = text.strip()
-    
-    # Remove any multiple spaces
-    text = re.sub(r'\s+', ' ', text)
-    
+    for quote in ['"""', "'''", '"', "'"]:
+        if (text.startswith(quote) and text.endswith(quote)
+                and len(text) > len(quote) * 2):
+            text = text[len(quote):-len(quote)].strip()
+            break
+
+    # Strip AI meta-text prefixes ("As Shyel:", "Shyel says:", etc.)
+    text = _strip_meta_prefix(text)
+
+    # Collapse any multiple spaces left over
+    text = re.sub(r'\s+', ' ', text).strip()
+
     return text
 
 
@@ -219,8 +283,12 @@ class AIChat:
                         rel_parts.append(f"{other_name} ({relation})")
                     system_prompt += "; ".join(rel_parts) + "."
             
-            # Add instruction for brief responses
-            system_prompt += " Always give brief, direct answers (1-2 sentences max)."
+            # Add instruction for brief responses and anti-meta-text rules
+            system_prompt += (
+                " Always give brief, direct answers (1-2 sentences max)."
+                " Output ONLY the words you speak. Never start with your name,"
+                " 'As [name]:', 'I would say:', or any meta-commentary."
+            )
             self.conversation_history[character_name] = [
                 {"role": "system", "content": system_prompt}
             ]
@@ -445,10 +513,14 @@ class AIChat:
 
             if response.status_code == 200:
                 data = response.json()
-                ai_response = data['choices'][0]['message']['content']
+                raw = data['choices'][0]['message']['content']
+                print(f"[DEBUG Chat] {character.name} raw: {repr(raw[:120])}")
 
                 # Clean the response (remove code blocks, markdown, etc.)
-                ai_response = clean_ai_response(ai_response)
+                ai_response = clean_ai_response(raw)
+                # Extra pass to catch any remaining meta-text
+                ai_response = _strip_meta_prefix(ai_response)
+                print(f"[DEBUG Chat] {character.name} clean: {repr(ai_response[:120])}")
 
                 # Persist only the plain user+assistant exchange to real history
                 history.append({"role": "user", "content": message})
@@ -517,12 +589,16 @@ class AIChat:
             listener_state = context_state.get('listener_state', 'idle')
             rel = context_state.get('relationship', 0)
 
+            # Explicit instruction to output ONLY the spoken words prevents the model
+            # from prepending meta-text like "As Shyel:" or "I would say:" that would
+            # make the speech bubble look like a prompt for the player.
             system_msg = (
                 f"{base_prompt} "
-                f"You just encountered {listener.name}. "
-                f"{listener.name} currently looks {listener_state}. "
-                f"Your relationship with them is {rel}/100. "
-                f"Say ONE short greeting or comment (max 12 words) in character."
+                f"You are speaking directly to {listener.name}, who looks {listener_state}. "
+                f"Relationship score with them: {rel}/100. "
+                f"Output ONLY the words you say out loud (max 10 words). "
+                f"Do NOT include your name, 'As [name]:', 'I would say:', or any explanation. "
+                f"Just the spoken words, e.g.: 'H-hi...' or '*waves* Hey there!'"
             )
 
             headers = {
@@ -533,7 +609,8 @@ class AIChat:
                 "model": self.model,
                 "messages": [
                     {"role": "system", "content": system_msg},
-                    {"role": "user", "content": f"Say something to {listener.name}."}
+                    # Minimal user turn — a pure trigger so the model outputs dialogue only
+                    {"role": "user", "content": "[speak now]"}
                 ],
                 "max_tokens": config.MAX_TOKENS_AGENT_DIALOGUE,
                 "temperature": config.PERSONALITY_TEMPERATURES.get(speaker.name, 0.7)
@@ -541,9 +618,21 @@ class AIChat:
 
             response = requests.post(self.api_url, headers=headers, json=payload, timeout=10)
             if response.status_code == 200:
-                text = clean_ai_response(response.json()['choices'][0]['message']['content'])
-                if callback:
+                raw_text = response.json()['choices'][0]['message']['content']
+                # DEBUG: Print raw API response
+                print(f"[DEBUG Agent Dialogue] {speaker.name} → {listener.name}")
+                print(f"  Raw API: {repr(raw_text[:100])}")
+
+                text = clean_ai_response(raw_text)
+                # Extra safety: strip any lingering meta-text the model might still sneak in
+                text = _strip_meta_prefix(text)
+
+                print(f"  After clean: {repr(text[:100])}")
+
+                if text and callback:
                     callback(text)
+                elif callback:
+                    callback(None)
             else:
                 if callback:
                     callback(None)

@@ -539,14 +539,18 @@ def main(android_mode=False):
                             
                             # Check if AI is available and enabled
                             if ai_chat.is_available:
-                                # Use async AI response
+                                # Capture the character NOW so the lambda always
+                                # refers to the right character even if the player
+                                # clicks someone else before the AI replies.
+                                _char = selected_character
+                                _fallback = sentiment_response
                                 chat_system.generate_response_async(
-                                    selected_character, 
+                                    _char,
                                     message,
-                                    lambda resp: (
+                                    lambda resp, c=_char, fb=_fallback: (
                                         ai_response_pending.__setitem__(0, (
-                                            selected_character,
-                                            chat_system.handle_ai_response(selected_character, resp) or sentiment_response
+                                            c,
+                                            chat_system.handle_ai_response(c, resp) or fb
                                         ))
                                     ),
                                     characters
